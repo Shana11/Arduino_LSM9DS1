@@ -20,6 +20,8 @@
 #include <Arduino.h>
 #include <Wire.h>
 
+#define GRAVITY           1.0 
+
 class LSM9DS1Class {
   public:
     LSM9DS1Class(TwoWire& wire);
@@ -32,6 +34,24 @@ class LSM9DS1Class {
     // Defaults to one-shot.
     void setContinuousMode();
     void setOneShotMode();
+
+    int getOperationalMode();
+
+    float accelOffset[3] = {0,0,0}; // zero point offset correction factor for calibration
+    float accelSlope[3] = {1,1,1};
+    float accelUnit = GRAVITY; 
+    //void setAccelScale(uint8_t aScl);
+
+    virtual int   setGyroODR(uint8_t range); //Sample Rate Hz 0:off,1:10,2:50 3:119,4:238,5:476,6:does not work 952Hz 
+    virtual float getGyroODR(); // Measured Sample rate of the sensor.
+    virtual int   accelAvailable();
+    virtual int   readAccel(float& x, float& y, float& z); 
+    virtual int   readRawAccel(float& x, float& y, float& z);
+    virtual void  setAccelOffset(float x, float y, float z);  //Store zero-point measurements as offset
+    virtual void  setAccelSlope(float x, float y, float z);  
+    virtual float getAccelFS();
+    virtual int   setAccelFS(uint8_t range); 
+
 
     // Accelerometer
     virtual int readAcceleration(float& x, float& y, float& z); // Results are in G (earth gravity).
@@ -49,10 +69,18 @@ class LSM9DS1Class {
     virtual float magneticFieldSampleRate(); // Sampling rate of the sensor.
 
   private:
+
+    unsigned long ODRCalibrationTime=250000;
+    float gyroODR; 
+    float accelODR; 
+    float measureAccelGyroODR();
+
     bool continuousMode;
     int readRegister(uint8_t slaveAddress, uint8_t address);
     int readRegisters(uint8_t slaveAddress, uint8_t address, uint8_t* data, size_t length);
     int writeRegister(uint8_t slaveAddress, uint8_t address, uint8_t value);
+
+
 
   private:
     TwoWire* _wire;

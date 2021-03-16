@@ -47,6 +47,163 @@ LSM9DS1Class::~LSM9DS1Class()
 {
 }
 
+// void LSM9DS1Class::setAccelScale(uint8_t aScl)
+// {
+//   // We need to preserve the other bytes in CTRL_REG6_XL. So, first read it:
+//   uint8_t tempRegValue = readRegister(LSM9DS1_ADDRESS, LSM9DS1_CTRL_REG6_XL);
+//   // Mask out accel scale bits:
+//   tempRegValue &= 0xE7;
+  
+//   switch (aScl)
+//   {
+//     case 4:
+//       tempRegValue |= (0x2 << 3);
+//       //settings.accel.scale = 4;
+//       break;
+//     case 8:
+//       tempRegValue |= (0x3 << 3);
+//      // settings.accel.scale = 8;
+//       break;
+//     case 16:
+//       tempRegValue |= (0x1 << 3);
+//      // settings.accel.scale = 16;
+//       break;
+//     default: // Otherwise it'll be set to 2g (0x0 << 3)
+//      // settings.accel.scale = 2;
+//       break;
+//   }
+//   writeRegister(LSM9DS1_ADDRESS, LSM9DS1_CTRL_REG6_XL, tempRegValue);
+  
+//   // Then calculate a new aRes, which relies on aScale being set correctly:
+//  // calcaRes();
+// }
+
+int LSM9DS1Class::getOperationalMode() //0=off , 1= Accel only , 2= Gyro +Accel
+{
+  if ((readRegister(LSM9DS1_ADDRESS, LSM9DS1_CTRL_REG6_XL) & 0b11100000) ==0 ) return 0;
+  if ((readRegister(LSM9DS1_ADDRESS, LSM9DS1_CTRL_REG1_G)  & 0b11100000) ==0 ) return 1;
+  else return 2;
+}
+
+float LSM9DS1Class::measureAccelGyroODR()
+{  if (getOperationalMode()==0) return 0;
+   float x, y, z;                               //dummies
+   unsigned long lastEventTime, 
+                 start=micros(); 
+   long count = -3;   
+   int fifoEna=continuousMode;                  //store FIFO status
+   setOneShotMode();                            //switch off FIFO
+   while ((micros()- start) < ODRCalibrationTime)         // measure
+   { if (accelAvailable())
+         {  lastEventTime = micros();
+            readAccel(x, y, z);  
+            count++;
+            if (count<=0) start=lastEventTime;
+         }
+   }
+//    Serial.println("measureAccelGyroODR Count "+String( count ) );
+//    Serial.println("dTa= "+String(lastEventTime-start)   );
+//    Serial.println("ODR= "+String(1000000.0*float(count)/float(lastEventTime-start))   ); 
+  if (fifoEna) setContinuousMode(); 
+  return (1000000.0*float(count)/float(lastEventTime-start) );
+}
+
+int LSM9DS1Class::setGyroODR(uint8_t range) // 0:off, 1:10Hz, 2:50Hz, 3:119Hz, 4:238Hz, 5:476Hz, 6:952Hz
+{ if (range >= 7) return 0;
+  uint8_t setting = ((readRegister(LSM9DS1_ADDRESS, LSM9DS1_CTRL_REG1_G) & 0b00011111) | (range << 5 ) );
+  writeRegister(LSM9DS1_ADDRESS, LSM9DS1_CTRL_REG1_G,setting);  
+    if (range > 0 )
+  { setting = ((readRegister(LSM9DS1_ADDRESS, LSM9DS1_CTRL_REG6_XL) & 0b00011111) | (range << 5));
+    writeRegister(LSM9DS1_ADDRESS, LSM9DS1_CTRL_REG6_XL,setting); 
+  }
+  switch (getOperationalMode()) {
+  case 0: { accelODR=0;             //off
+        gyroODR=0; 
+        break;
+      }
+  case 1: { accelODR=  measureAccelGyroODR(); //accelerometer only
+        gyroODR = 0;
+        break;
+      } 
+  case 2: { accelODR=  measureAccelGyroODR(); //shared ODR
+        gyroODR = accelODR;
+      }
+  }
+  return 1;
+}
+
+float LSM9DS1Class::getGyroODR()
+{  return gyroODR;
+// float Ranges[] ={0.0, 10.0, 50.0, 119.0, 238.0, 476.0, 952.0, 0.0 };  //Hz
+//   uint8_t setting = readRegister(LSM9DS1_ADDRESS, LSM9DS1_CTRL_REG1_G)  >> 5;
+//   return Ranges [setting];   //  used to be  return 119.0F;
+}
+
+int LSM9DS1Class::accelAvailable()
+{
+  if (continuousMode) {
+    // Read FIFO_SRC. If any of the rightmost 8 bits have a value, there is data.
+    if (readRegister(LSM9DS1_ADDRESS, 0x2F) & 63) {
+      return 1;
+    }
+  } else {
+    if (readRegister(LSM9DS1_ADDRESS, LSM9DS1_STATUS_REG) & 0x01) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+int LSM9DS1Class::readAccel(float& x, float& y, float& z)  // return calibrated data in a unit of choise
+{   if (!readRawAccel(x,y,z)) return 0; 
+  // See releasenotes     read =  Unit * Slope * (FS / 32786 * Data - Offset )
+  x = accelUnit * accelSlope[0] * (x - accelOffset[0]);
+  y = accelUnit * accelSlope[1] * (y - accelOffset[1]);
+  z = accelUnit * accelSlope[2] * (z - accelOffset[2]);
+  return 1;
+}
+
+int LSM9DS1Class::readRawAccel(float& x, float& y, float& z)   // return raw uncalibrated data 
+{ int16_t data[3];
+  if (!readRegisters(LSM9DS1_ADDRESS, LSM9DS1_OUT_X_XL, (uint8_t*)data, sizeof(data))) 
+  {  x = NAN;     y = NAN;     z = NAN;   return 0;
+  }
+  // See releasenotes     read =  Unit * Slope * (PFS / 32786 * Data - Offset )
+  float scale =  getAccelFS()/32768.0 ;   
+  x = scale * data[0];
+  y = scale * data[1];
+  z = scale * data[2];
+  return 1;
+}
+
+void LSM9DS1Class::setAccelOffset(float x, float y, float z) 
+{  accelOffset[0] = x /(accelUnit * accelSlope[0]);  
+   accelOffset[1] = y /(accelUnit * accelSlope[1]);
+   accelOffset[2] = z /(accelUnit * accelSlope[2]);
+}
+//Slope is already dimensionless, so it can be stored as is.
+void LSM9DS1Class::setAccelSlope(float x, float y, float z) 
+{  if (x==0) x=1;  //zero slope not allowed
+   if (y==0) y=1;
+   if (z==0) z=1;
+   accelSlope[0] = x ;   
+   accelSlope[1] = y ;
+   accelSlope[2] = z ;
+}
+
+int LSM9DS1Class::setAccelFS(uint8_t range) // 0: ±2g ; 1: ±16g ; 2: ±4g ; 3: ±8g  
+{ if (range >=4) return 0;
+    range = (range & 0b00000011) << 3;
+  uint8_t setting = ((readRegister(LSM9DS1_ADDRESS, LSM9DS1_CTRL_REG6_XL) & 0xE7) | range);
+  return writeRegister(LSM9DS1_ADDRESS, LSM9DS1_CTRL_REG6_XL,setting) ;
+}
+
+float LSM9DS1Class::getAccelFS() // Full scale dimensionless, but its value corresponds to g
+{   float ranges[] ={2.0, 24.0, 4.0, 8.0}; //g
+    uint8_t setting = (readRegister(LSM9DS1_ADDRESS, LSM9DS1_CTRL_REG6_XL) & 0x18) >> 3;
+    return ranges[setting] ;
+}
+
 int LSM9DS1Class::begin()
 {
   _wire->begin();
@@ -70,7 +227,7 @@ int LSM9DS1Class::begin()
   }
 
   writeRegister(LSM9DS1_ADDRESS, LSM9DS1_CTRL_REG1_G, 0x78); // 119 Hz, 2000 dps, 16 Hz BW
-  writeRegister(LSM9DS1_ADDRESS, LSM9DS1_CTRL_REG6_XL, 0x70); // 119 Hz, 4G
+  writeRegister(LSM9DS1_ADDRESS, LSM9DS1_CTRL_REG6_XL, 0xD0); //(0xD0 952hz) (0x70 119 Hz, 4G)
 
   writeRegister(LSM9DS1_ADDRESS_M, LSM9DS1_CTRL_REG1_M, 0xb4); // Temperature compensation enable, medium performance, 20 Hz
   writeRegister(LSM9DS1_ADDRESS_M, LSM9DS1_CTRL_REG2_M, 0x00); // 4 Gauss
